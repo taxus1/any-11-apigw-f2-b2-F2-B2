@@ -112,7 +112,8 @@ public class UserAuthGatekeeper {
                     identity == null ? "" : identity.userId(),
                     identity == null ? "" : identity.tenantId());
         }
-        // 用户鉴权启用时，原始令牌（Authorization）不递上游
-        return new OutboundAuth(identity, pass, verifier != null);
+        // 用户鉴权启用时，原始令牌（Authorization）不递上游；
+        // 应用编号不归本类管（应用鉴权过滤器验过后经 exchange 属性并入，见 GatewayProxyWebFilter）
+        return new OutboundAuth(identity, pass, verifier != null, null);
     }
 }

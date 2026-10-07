@@ -1,5 +1,6 @@
 package com.apigw.common.web;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -34,12 +35,35 @@ public final class GatewayHeaders {
      * 网关写向上游的身份头（出站）：用户标识、租户标识。
      * 这两个头与通行标记由网关<b>独占</b>：入站请求里若带同名头，转发前一律先清掉，
      * 再按网关自己验签的结果写入——调用方塞的假身份一个字都到不了上游。
+     * 完整保留头清单见 {@link #RESERVED_HEADERS}。
      */
     public static final String USER_ID_HEADER = "X-User-Id";
     public static final String TENANT_ID_HEADER = "X-Tenant-Id";
 
     /** 网关盖的通行标记（出站）：上游据此确认这笔请求确实过了网关。 */
     public static final String GATEWAY_PASS_HEADER = "X-Gateway-Pass";
+
+    /**
+     * 网关保留头（出站方向归网关独占）：身份、租户、通行标记，以及认应用用的两个凭据头。
+     * 这些头的合法取值只能由网关产出（验签结果、HMAC 盖章、应用鉴权认定的编号），
+     * 所以调用方塞的值<b>一律不许递到上游</b>——转发器对这份清单无条件清零后，
+     * 只按网关自己的验签结果重写，与走哪种路由、有没有验出身份无关。
+     *
+     * 清单只有这一份，清零与重写共用，别处不得再各列一遍。
+     * {@code Authorization} 不列在这里：它只在用户鉴权启用时才是保留头
+     * （未启用时网关不碰它，上游可能自己验令牌），由 OutboundAuth.stripAuthorization 表达。
+     */
+    public static final List<String> RESERVED_HEADERS = List.of(
+            USER_ID_HEADER, TENANT_ID_HEADER, GATEWAY_PASS_HEADER,
+            APP_NO_HEADER, APP_SECRET_HEADER);
+
+    /**
+     * exchange 属性 key（<b>不是请求头</b>）：应用鉴权通过后，网关认定的应用编号
+     * 经这个属性递给转发链路，转发器只从属性取认定值写 {@code X-App-No}。
+     * 请求头那条通道谁都能塞，exchange 属性只有网关自己能放。
+     */
+    public static final String AUTHENTICATED_APP_NO_ATTRIBUTE =
+            GatewayHeaders.class.getName() + ".authenticatedAppNo";
 
     /** 追踪号：字母数字与 . _ -，长度 8..64（覆盖常见 trace/span 号与 UUID）。 */
     private static final Pattern TRACE_ID_PATTERN = Pattern.compile("[A-Za-z0-9._-]{8,64}");

@@ -183,7 +183,11 @@ public class GatewayProxyWebFilter implements WebFilter, Ordered {
                     URI targetUri = UpstreamForwarder.resolveTargetUri(
                             route.getUpstream(), exchange.getRequest());
                     OutboundAuth outboundAuth = userAuth.outbound(
-                            traceId, exchange.getRequest(), identity);
+                            traceId, exchange.getRequest(), identity)
+                            // 应用鉴权（若开启）验过后会把认定的应用编号放在 exchange 属性里；
+                            // 请求头里的 X-App-No 谁都能塞，转发器只信属性这个通道
+                            .withAppNo(exchange.getAttribute(
+                                    GatewayHeaders.AUTHENTICATED_APP_NO_ATTRIBUTE));
                     // 响应处理必须在 WebClient 的 exchangeToMono 回调内完成（此时仍持有上游连接），
                     // 所以把 writeUpstreamResponse 作为 handler 传进去
                     return forwarder.forward(route, exchange.getRequest(), traceId, targetUri,

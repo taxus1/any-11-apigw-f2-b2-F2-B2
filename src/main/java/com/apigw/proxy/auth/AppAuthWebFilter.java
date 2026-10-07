@@ -86,7 +86,12 @@ public class AppAuthWebFilter implements WebFilter, Ordered {
     }
 
     private ServerWebExchange withAuthenticatedApp(ServerWebExchange exchange, String authenticatedAppNo) {
-        // 用网关认定的编号覆盖入站头：下游与流水只认这个，调用方即便伪造别的 X-App-No 也过不来
+        // 认定编号走两条通道：
+        // 1. 覆盖入站头——流水与链尾直接读头，不再信任调用方原值；
+        // 2. 放进 exchange 属性——转发器只从这个属性取认定值写给上游。
+        //    请求头那条通道谁都能塞，exchange 属性只有网关自己能放，
+        //    调用方伪造的 X-App-No 到不了上游（转发器还会把入站同名头清掉）。
+        exchange.getAttributes().put(GatewayHeaders.AUTHENTICATED_APP_NO_ATTRIBUTE, authenticatedAppNo);
         return exchange.mutate()
                 .request(b -> b.headers(h -> h.set(GatewayHeaders.APP_NO_HEADER, authenticatedAppNo)))
                 .build();

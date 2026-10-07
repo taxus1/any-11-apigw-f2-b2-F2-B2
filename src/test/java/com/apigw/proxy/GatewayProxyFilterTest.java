@@ -354,6 +354,34 @@ class GatewayProxyFilterTest {
     }
 
     @Test
+    void userAuthNotEnabled_forgedReservedHeadersStripped_authorizationLeftAlone() {
+        // 用户鉴权未启用（守门人没配验签密钥）：保留头照样无条件清——与是否验出身份无关；
+        // Authorization 此时不是保留头（网关不验令牌，上游可能自己验），原样透传
+        loadRoutes(route("open", upstream.baseUrl(),
+                List.of(cond("PATH_PREFIX", null, "/open/", 1)), List.of()));
+
+        var resp = client.get().uri(baseUrl + "/open/1")
+                .header("Authorization", "Bearer caller-token")
+                .header("X-User-Id", "admin")
+                .header("X-Tenant-Id", "tenant-victim")
+                .header("X-Gateway-Pass", "v1.0.forged")
+                .header("X-App-No", "app-forged")
+                .header("X-App-Secret", "secret-forged")
+                .exchange().block();
+        assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
+        resp.releaseBody().block();
+
+        HttpExchange got = upstream.lastExchange();
+        assertThat(got.getRequestHeaders().get("X-User-Id")).isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-Tenant-Id")).isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-Gateway-Pass")).isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-App-No")).isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-App-Secret")).isNullOrEmpty();
+        // 未启用用户鉴权：Authorization 不是保留头，原样透传（上游可能自己验令牌）
+        assertThat(got.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer caller-token");
+    }
+
+    @Test
     void callerTraceId_isHonored_andBecomesRequestIdOfAccessRow() {
         loadRoutes(route("order", upstream.baseUrl(),
                 List.of(cond("PATH_PREFIX", null, "/order/", 1)), List.of()));
