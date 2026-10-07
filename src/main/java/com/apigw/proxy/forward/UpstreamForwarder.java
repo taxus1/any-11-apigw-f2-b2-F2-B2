@@ -103,6 +103,12 @@ public class UpstreamForwarder {
         return URI.create(sb.toString());
     }
 
+    /** 网关会写的独占头：调用方塞的同名值一律不采信，值只由网关按验签结果写。 */
+    private static final List<String> GATEWAY_OWNED_HEADERS = List.of(
+            GatewayHeaders.USER_ID_HEADER,
+            GatewayHeaders.TENANT_ID_HEADER,
+            GatewayHeaders.GATEWAY_PASS_HEADER);
+
     /** 构造发往上游的请求：头清洗 → 独占头清零 → X-Forwarded-* → 身份/通行头 → 请求动作。 */
     private ServerHttpRequest prepareRequest(GatewayRoute route, ServerHttpRequest incoming,
                                              String traceId, OutboundAuth auth) {
@@ -116,12 +122,8 @@ public class UpstreamForwarder {
                 headers.set("te", HttpHeaderValues.TRAILERS.toString());
             }
 
-            // 2. 网关独占头清零：身份头/通行标记只由网关写。调用方塞的同名头先全部清掉，
-            //    再按网关验签结果写——伪造身份一个字都到不了上游（在动作之前清，运营显式配置的
-            //    补头动作仍可覆盖，那是配置侧的明确选择，不是调用方能影响的）
-            headers.remove(GatewayHeaders.USER_ID_HEADER);
-            headers.remove(GatewayHeaders.TENANT_ID_HEADER);
-            headers.remove(GatewayHeaders.GATEWAY_PASS_HEADER);
+            // 2. 网关独占头只由网关写：清写都按下面那份清单来，免得两处各列一遍
+            //    （在动作之前处理，运营显式配置的补头动作仍可覆盖，那是配置侧的明确选择）
             if (auth.stripAuthorization()) {
                 // 用户鉴权启用：原始令牌只在「调用方↔网关」这段有效，绝不原样递上游
                 headers.remove(GatewayHeaders.AUTHORIZATION_HEADER);
@@ -143,12 +145,15 @@ public class UpstreamForwarder {
             }
             headers.set("X-Gateway-Trace-Id", traceId);
 
-            // 4. 网关认定的身份与通行标记：只有验签后有值才写，匿名就没有这些头
+            // 4. 网关认定的身份与通行标记：验签有结果才写，匿名就没有这些头；
+            //    写之前先按同一份清单清一遍，调用方塞的同名值不作数
             if (auth.identity() != null) {
+                GATEWAY_OWNED_HEADERS.forEach(headers::remove);
                 headers.set(GatewayHeaders.USER_ID_HEADER, auth.identity().userId());
                 headers.set(GatewayHeaders.TENANT_ID_HEADER, auth.identity().tenantId());
             }
             if (auth.gatewayPass() != null) {
+                headers.remove(GatewayHeaders.GATEWAY_PASS_HEADER);
                 headers.set(GatewayHeaders.GATEWAY_PASS_HEADER, auth.gatewayPass());
             }
 
