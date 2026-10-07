@@ -149,7 +149,8 @@ public class GatewayProxyWebFilter implements WebFilter, Ordered {
                     // 登录鉴权（标记跟着路由走，一条一配）。开放路由与受保护路由走同一套链路：
                     // - 受保护路由：必须带一张验得过的令牌（签名真/没过期/信息全），任何一样不过都 401；
                     // - 开放路由：不拦人，令牌只是可选的身份补充，验不过按匿名放行（口径见 README）。
-                    //   身份头由转发器无条件先清后写，所以坏令牌不会往上游泄露任何伪造身份。
+                    //   保留头由转发器在所有请求动作之后无条件清零、再按验签结论写回，
+                    //   所以坏令牌/没令牌时调用方塞的身份、应用凭据一个字都漏不到上游。
                     UserIdentity identity;
                     if (route.requiresAuth()) {
                         if (!userAuth.tokenVerificationEnabled()) {
@@ -182,8 +183,12 @@ public class GatewayProxyWebFilter implements WebFilter, Ordered {
                     outcome.set(new Outcome(route.getRouteNo(), route.getUpstream(), "FORWARDED"));
                     URI targetUri = UpstreamForwarder.resolveTargetUri(
                             route.getUpstream(), exchange.getRequest());
+                    // 接入鉴权验过的可信应用编号只能来自 AppAuthWebFilter 写入的 exchange 属性，
+                    // 绝不从入站 X-App-No 头取（那个头在转发前会被无条件清掉）
+                    String authenticatedAppNo = exchange.getAttribute(
+                            com.apigw.proxy.auth.AppAuthWebFilter.AUTHENTICATED_APP_NO_ATTR);
                     OutboundAuth outboundAuth = userAuth.outbound(
-                            traceId, exchange.getRequest(), identity);
+                            traceId, exchange.getRequest(), identity, authenticatedAppNo);
                     // 响应处理必须在 WebClient 的 exchangeToMono 回调内完成（此时仍持有上游连接），
                     // 所以把 writeUpstreamResponse 作为 handler 传进去
                     return forwarder.forward(route, exchange.getRequest(), traceId, targetUri,

@@ -102,8 +102,12 @@ public class UserAuthGatekeeper {
     /**
      * 组装发往上游的身份上下文。通行标记把 traceId/方法/路径/身份和时间戳一起签进去，
      * 上游用共享密钥验得出「确实过了网关、且身份头没被换过」。
+     *
+     * @param authenticatedAppNo 接入鉴权验过的可信应用编号（来自 exchange 属性）；
+     *                           null 表示没有接入鉴权结论，X-App-No 一个字都不向上游写
      */
-    public OutboundAuth outbound(String traceId, ServerHttpRequest request, UserIdentity identity) {
+    public OutboundAuth outbound(String traceId, ServerHttpRequest request, UserIdentity identity,
+                                 String authenticatedAppNo) {
         String pass = null;
         if (passSigner != null) {
             String method = request.getMethod() == null ? "" : request.getMethod().name();
@@ -113,6 +117,6 @@ public class UserAuthGatekeeper {
                     identity == null ? "" : identity.tenantId());
         }
         // 用户鉴权启用时，原始令牌（Authorization）不递上游
-        return new OutboundAuth(identity, pass, verifier != null);
+        return new OutboundAuth(identity, pass, authenticatedAppNo, verifier != null);
     }
 }

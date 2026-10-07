@@ -300,6 +300,24 @@ class UserAuthProxyFilterTest {
     }
 
     @Test
+    void protectedRoute_repeatedIdentityHeaders_collapseToSingleGatewayValue() {
+        loadRoutes(route("secure", 1));
+
+        var resp = client.get().uri(baseUrl + "/secure/1")
+                .header("Authorization", "Bearer " + validToken())
+                // 同一个头塞多遍（含大小写变体）：整组清掉后只允许网关写回单值
+                .headers(h -> h.addAll("X-User-Id", List.of("admin", "root")))
+                .header("x-tenant-id", "tenant-victim")
+                .exchange().block();
+        assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
+        resp.releaseBody().block();
+
+        var h = upstream.lastExchange().getRequestHeaders();
+        assertThat(h.get("X-User-Id")).containsExactly("user-1");
+        assertThat(h.get("X-Tenant-Id")).containsExactly("tenant-a");
+    }
+
+    @Test
     void protectedRoute_butAuthNotConfigured_failsClosed503() {
         // 配了「需登录」却没配验签密钥：配置事故，fail-closed，绝不裸放行
         var gatekeeper = new UserAuthGatekeeper(null, null, clock);
@@ -329,11 +347,23 @@ class UserAuthProxyFilterTest {
                 .header("X-User-Id", "admin")
                 .header("X-Tenant-Id", "tenant-victim")
                 .header("X-Gateway-Pass", "v1.0.forged")
+                // 顺手把应用编号与密钥也编上：匿名开放路由上一样一个字都不能到上游
+                .header("X-App-No", "app-billing")
+                .header("X-App-Secret", "made-up-secret")
                 .exchange().block();
         assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
         resp.releaseBody().block();
 
         HttpExchange got = upstream.lastExchange();
+        // 事故回放的核心断言：匿名时上游身份头「不存在」，而不是带着调用方编的值
+        assertThat(got.getRequestHeaders().get("X-User-Id"))
+                .as("开放路由匿名请求：伪造用户标识必须被清掉").isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-Tenant-Id"))
+                .as("开放路由匿名请求：伪造租户标识必须被清掉").isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-App-No"))
+                .as("没经过接入鉴权：调用方编的应用编号不许到上游").isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-App-Secret"))
+                .as("应用密钥只用于调用方↔网关这一跳，绝不重放给上游").isNullOrEmpty();
         // 通行标记仍是网关自己盖的（匿名身份），伪造的进不来
         String pass = got.getRequestHeaders().getFirst("X-Gateway-Pass");
         assertThat(pass).isNotBlank().isNotEqualTo("v1.0.forged");
@@ -343,12 +373,44 @@ class UserAuthProxyFilterTest {
     }
 
     @Test
+    void openRoute_forgedHeaders_useCaseVariantsEmptyAndRepeatedValues_stillPurged() {
+        // 同一种口径：大小写变体、空值、多值都按名整头清
+        loadRoutes(route("open", 0));
+
+        var resp = client.get().uri(baseUrl + "/open/1")
+                .header("x-user-id", "admin", "second-forged")
+                .header("X-TENANT-ID", "tenant-victim")
+                .header("X-Gateway-Pass", "")
+                .header("x-app-no", "forged-app")
+                .header("X-APP-SECRET", "s1", "s2")
+                .exchange().block();
+        assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
+        resp.releaseBody().block();
+
+        var h = upstream.lastExchange().getRequestHeaders();
+        assertThat(h.get("X-User-Id")).isNullOrEmpty();
+        assertThat(h.get("X-Tenant-Id")).isNullOrEmpty();
+        // 入站空值通行标记被整头清掉后，只剩网关自己盖的那一个（单值），且验得过
+        String pass = h.getFirst("X-Gateway-Pass");
+        assertThat(h.get("X-Gateway-Pass")).hasSize(1);
+        assertThat(passSigner.verify(pass, h.getFirst("X-Gateway-Trace-Id"),
+                "GET", "/open/1", "", "", clock.millis(), 60_000)).isTrue();
+        assertThat(h.get("X-App-No")).isNullOrEmpty();
+        assertThat(h.get("X-App-Secret")).isNullOrEmpty();
+    }
+
+    @Test
     void openRoute_withBadToken_passesAnonymously_notBlocked() {
         loadRoutes(route("open", 0));
 
         // 统一口径：开放路由上坏令牌不拦人，按匿名放行（浏览器里过期令牌不该打死公开接口）
         var resp = client.get().uri(baseUrl + "/open/1")
                 .header("Authorization", "Bearer expired.or.garbage.token")
+                // 坏令牌 + 伪造身份/凭据：放行可以，一个调用方值都不许到上游
+                .header("X-User-Id", "admin")
+                .header("X-Tenant-Id", "tenant-victim")
+                .header("X-App-No", "app-1")
+                .header("X-App-Secret", "leak")
                 .exchange().block();
         assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
         resp.releaseBody().block();
@@ -356,8 +418,31 @@ class UserAuthProxyFilterTest {
         HttpExchange got = upstream.lastExchange();
         assertThat(got.getRequestHeaders().get("X-User-Id")).isNullOrEmpty();
         assertThat(got.getRequestHeaders().get("X-Tenant-Id")).isNullOrEmpty();
-        // 坏令牌本身也不递上游
+        assertThat(got.getRequestHeaders().get("X-App-No")).isNullOrEmpty();
+        assertThat(got.getRequestHeaders().get("X-App-Secret")).isNullOrEmpty();
+        // 坏令牌本身也不递上游（用户鉴权启用即剥 Authorization）
         assertThat(got.getRequestHeaders().get("Authorization")).isNullOrEmpty();
+    }
+
+    @Test
+    void protectedRoute_validToken_appCredentialForgery_isStrippedButIdentityKept() {
+        // 真令牌 + 伪造应用凭据：身份按令牌透传，应用编号/密钥因为没有接入鉴权结论一律不写
+        loadRoutes(route("secure", 1));
+
+        var resp = client.get().uri(baseUrl + "/secure/1")
+                .header("Authorization", "Bearer " + validToken())
+                .header("X-App-No", "app-billing")
+                .header("X-App-Secret", "made-up-secret")
+                .exchange().block();
+        assertThat(resp.statusCode()).isEqualTo(HttpStatus.OK);
+        resp.releaseBody().block();
+
+        var h = upstream.lastExchange().getRequestHeaders();
+        assertThat(h.getFirst("X-User-Id")).isEqualTo("user-1");
+        assertThat(h.getFirst("X-Tenant-Id")).isEqualTo("tenant-a");
+        assertThat(h.get("X-App-No")).isNullOrEmpty();
+        assertThat(h.get("X-App-Secret")).isNullOrEmpty();
+        assertThat(h.get("Authorization")).isNullOrEmpty();
     }
 
     @Test

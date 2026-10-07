@@ -1,6 +1,7 @@
 package com.apigw.domain.route;
 
 import com.apigw.common.exception.BizException;
+import com.apigw.common.web.GatewayHeaders;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -101,6 +102,17 @@ public class GatewayRule {
         }
         this.stage = expectStage;
         validateFields(ordinal, label);
+        // 请求方向动作不许碰网关保留头：这些头转发前无条件清零、只按网关验签结果写回，
+        // 配置侧补/删它们都不会生效（先动作后清零），直接在保存时拒绝，免得配了个假象。
+        // Authorization 是「用户鉴权启用时才保留」的有条件保留头，配置侧不拦（无鉴权部署
+        // 里上游可能本来就要看它）；启用鉴权时转发器照样必剥。
+        if (RuleTypes.STAGE_REQUEST.equals(this.stage)
+                && GatewayHeaders.isReservedRequestHeader(this.name, false)) {
+            throw new BizException(label + "第 " + ordinal + " 条的头名 " + this.name
+                    + " 是网关保留头（X-User-Id / X-Tenant-Id / X-Gateway-Pass / "
+                    + "X-App-No / X-App-Secret），请求方向不允许配置补/删，"
+                    + "它的值只能由网关按鉴权结果写入");
+        }
     }
 
     /** 按具体类型校验 name / value 的必填要求。 */

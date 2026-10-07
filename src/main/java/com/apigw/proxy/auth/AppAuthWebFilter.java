@@ -41,6 +41,14 @@ public class AppAuthWebFilter implements WebFilter, Ordered {
     /** 比转发过滤器（HIGHEST_PRECEDENCE + 10）更早：先认人，再谈转发。 */
     public static final int ORDER = Ordered.HIGHEST_PRECEDENCE + 5;
 
+    /**
+     * 认证通过的应用编号（规范化后的可信值）存在 exchange 属性里，交给转发过滤器读取。
+     * 不走请求头传递：X-App-No 是网关保留头，入站值在转发前会被整头清掉，可信结论只能
+     * 经由这个网关注入、调用方碰不到的属性传给转发器。
+     */
+    public static final String AUTHENTICATED_APP_NO_ATTR =
+            AppAuthWebFilter.class.getName() + ".authenticatedAppNo";
+
     private final AppCredentialCatalog catalog;
     private final ObjectMapper objectMapper;
 
@@ -78,7 +86,9 @@ public class AppAuthWebFilter implements WebFilter, Ordered {
         return catalog.authenticate(appNo.trim(), secret, canonicalIp)
                 .flatMap(decision -> {
                     if (decision.allowed()) {
-                        // 认证通过：把规范化后的可信应用编号带下去，流水直接用，不再信任原始头
+                        // 认证通过：把规范化后的可信应用编号写进 exchange 属性，转发器只从这里取；
+                        // 同时覆盖入站头，让同一过滤链上的流水记录等读者也只看得到可信值。
+                        // 入站原始头在转发前仍会被无条件清掉，调用方伪造别的 X-App-No 过不来
                         return chain.filter(withAuthenticatedApp(exchange, decision.authenticatedAppNo()));
                     }
                     return reject(exchange, toError(decision.outcome()));
@@ -87,9 +97,13 @@ public class AppAuthWebFilter implements WebFilter, Ordered {
 
     private ServerWebExchange withAuthenticatedApp(ServerWebExchange exchange, String authenticatedAppNo) {
         // 用网关认定的编号覆盖入站头：下游与流水只认这个，调用方即便伪造别的 X-App-No 也过不来
-        return exchange.mutate()
+        ServerWebExchange mutated = exchange.mutate()
                 .request(b -> b.headers(h -> h.set(GatewayHeaders.APP_NO_HEADER, authenticatedAppNo)))
                 .build();
+        // 可信结论另走 exchange 属性交给转发器（mutate 出来的 exchange 与原 exchange 共用属性表）：
+        // 转发前 X-App-No 头会被整头清掉，能被重新写回上游的只有这个网关内部属性里的值
+        mutated.getAttributes().put(AUTHENTICATED_APP_NO_ATTR, authenticatedAppNo);
+        return mutated;
     }
 
     private static UpstreamFailureKind toError(AppCredentialCatalog.Outcome outcome) {

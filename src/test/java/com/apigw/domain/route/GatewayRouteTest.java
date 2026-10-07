@@ -249,4 +249,46 @@ class GatewayRouteTest {
         assertEquals(2, r.getConditions().size());
         assertEquals("/pay/", r.getConditions().get(0).getValue());
     }
+
+    @Test
+    void requestActions_onReservedHeaders_areRejected_addAndRemove_caseInsensitive() {
+        GatewayRoute r = base();
+
+        for (String reserved : new String[] {
+                "X-User-Id", "x-tenant-id", "X-GATEWAY-PASS", "X-App-No", "x-app-secret"}) {
+            // 补不行
+            BizException add = assertThrows(BizException.class, () -> r.replaceRules(List.of(),
+                    List.of(GatewayRule.create(null, RuleTypes.TYPE_REQ_ADD_HEADER,
+                            reserved, "v", 1))));
+            assertTrue(add.getMessage().contains("网关保留头"), add.getMessage());
+            // 删也不行（清零是网关自己的事，配置动作碰这组头一律拒绝）
+            BizException remove = assertThrows(BizException.class, () -> r.replaceRules(List.of(),
+                    List.of(GatewayRule.create(null, RuleTypes.TYPE_REQ_REMOVE_HEADER,
+                            reserved, null, 1))));
+            assertTrue(remove.getMessage().contains("网关保留头"), remove.getMessage());
+        }
+    }
+
+    @Test
+    void responseActions_onSameHeaderNames_areAllowed_directionIsIsolated() {
+        // 保留头独占的是「发往上游的请求方向」；上游响应里若回同名头，响应动作仍可处理
+        GatewayRoute r = base();
+        r.replaceRules(List.of(),
+                List.of(GatewayRule.create(null, RuleTypes.TYPE_RESP_ADD_HEADER,
+                        "X-Trace-Note", "t", 1),
+                        GatewayRule.create(null, RuleTypes.TYPE_RESP_REMOVE_HEADER,
+                                "X-User-Id", null, 2)));
+        assertEquals(2, r.getActions().size());
+    }
+
+    @Test
+    void requestAction_onAuthorization_isAllowed_runtimeStripsWhenUserAuthEnabled() {
+        // Authorization 是有条件保留头：配置侧不拦（无鉴权部署上游可能本来就要看它），
+        // 启用用户鉴权时由转发器无条件剥掉
+        GatewayRoute r = base();
+        r.replaceRules(List.of(),
+                List.of(GatewayRule.create(null, RuleTypes.TYPE_REQ_ADD_HEADER,
+                        "Authorization", "Bearer configured", 1)));
+        assertEquals(1, r.getActions().size());
+    }
 }
